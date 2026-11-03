@@ -8,8 +8,9 @@ this repository owns the repeatable implementation.
 
 | Workflow | Intended callers | Purpose |
 | --- | --- | --- |
-| `node-ci.yml` | frontend, backend | Install, format, lint, test, build/check, and optionally scan with SonarQube |
-| `python-ci.yml` | notification-service | Install, format, lint, test, compile, and optionally scan with SonarQube |
+| `node-ci.yml` | frontend, backend | Install, format, lint, unit test, build/check, and optionally publish coverage |
+| `python-ci.yml` | notification-service | Install, format, lint, unit test, compile, and optionally publish coverage |
+| `sonarqube.yml` | all repositories | Download coverage from a CI job and run the independent SonarQube quality gate |
 | `ecr-publish.yml` | backend, notification-service | Build a container, fail on high/critical vulnerabilities, assume AWS credentials with OIDC, and push an immutable ECR image |
 | `s3-cloudfront-deploy.yml` | frontend | Build and scan static assets, upload them to S3 with cache headers, and invalidate CloudFront |
 | `dependabot-auto-merge.yml` | all repositories | Verify Dependabot metadata, approve eligible patch/minor updates, and enable auto-merge |
@@ -72,6 +73,17 @@ jobs:
     with:
       install-command: npm ci --ignore-scripts
       build-command: npm run syntax
+      coverage-artifact-name: backend-coverage
+
+  sonar:
+    needs: quality
+    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
+    with:
+      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+      coverage-artifact-name: backend-coverage
+      coverage-download-path: coverage
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 ```
 
 ## Caller: backend CD
@@ -99,9 +111,20 @@ jobs:
     with:
       install-command: npm ci --ignore-scripts
       build-command: npm run syntax
+      coverage-artifact-name: backend-coverage
+
+  sonar:
+    needs: quality
+    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
+    with:
+      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+      coverage-artifact-name: backend-coverage
+      coverage-download-path: coverage
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   publish:
-    needs: quality
+    needs: [quality, sonar]
     permissions:
       contents: read
       id-token: write
@@ -136,8 +159,15 @@ jobs:
   quality:
     uses: tikto-calender/reusable-workflow/.github/workflows/python-ci.yml@v1
     with:
-      run-sonarqube: true
+      coverage-artifact-name: notification-coverage
+
+  sonar:
+    needs: quality
+    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
+    with:
       sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+      coverage-artifact-name: notification-coverage
+      coverage-download-path: "."
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 ```
@@ -165,13 +195,20 @@ jobs:
   quality:
     uses: tikto-calender/reusable-workflow/.github/workflows/python-ci.yml@v1
     with:
-      run-sonarqube: true
+      coverage-artifact-name: notification-coverage
+
+  sonar:
+    needs: quality
+    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
+    with:
       sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+      coverage-artifact-name: notification-coverage
+      coverage-download-path: "."
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   publish:
-    needs: quality
+    needs: [quality, sonar]
     permissions:
       contents: read
       id-token: write
@@ -207,8 +244,15 @@ jobs:
     uses: tikto-calender/reusable-workflow/.github/workflows/node-ci.yml@v1
     with:
       build-command: npm run build
-      run-sonarqube: true
+      coverage-artifact-name: frontend-coverage
+
+  sonar:
+    needs: quality
+    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
+    with:
       sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+      coverage-artifact-name: frontend-coverage
+      coverage-download-path: coverage
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 ```
@@ -238,13 +282,20 @@ jobs:
     with:
       # The deployment job performs the production build after this quality gate.
       build-command: ""
-      run-sonarqube: true
+      coverage-artifact-name: frontend-coverage
+
+  sonar:
+    needs: quality
+    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
+    with:
       sonar-host-url: ${{ vars.SONAR_HOST_URL }}
+      coverage-artifact-name: frontend-coverage
+      coverage-download-path: coverage
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   deploy:
-    needs: quality
+    needs: [quality, sonar]
     permissions:
       contents: read
       id-token: write
@@ -253,6 +304,11 @@ jobs:
       aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
       environment-name: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
 ```
+
+The `sonar` job is optional. To run only lint/unit tests/build, remove the `sonar`
+job and the `coverage-artifact-name` input. Keeping SonarQube separate means its
+secret and scanner are not coupled to the base CI workflows. Coverage is passed
+between jobs as a one-day artifact, so unit tests do not run twice.
 
 ## Dependabot automatic PRs and auto-merge
 

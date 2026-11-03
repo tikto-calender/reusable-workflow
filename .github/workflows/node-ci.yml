@@ -38,26 +38,21 @@ on:
         type: string
         required: false
         default: ""
-      run-sonarqube:
-        description: Run the SonarQube scanner after all quality checks pass.
-        type: boolean
-        required: false
-        default: false
-      sonar-host-url:
-        description: SonarQube server URL. Required when run-sonarqube is true.
+      coverage-artifact-name:
+        description: Artifact name used to expose test coverage to a later job. Leave empty to skip upload.
         type: string
         required: false
         default: ""
+      coverage-path:
+        description: Coverage path relative to working-directory.
+        type: string
+        required: false
+        default: coverage
       timeout-minutes:
         description: Maximum duration of the quality job.
         type: number
         required: false
         default: 20
-    secrets:
-      SONAR_TOKEN:
-        description: SonarQube authentication token.
-        required: false
-
 permissions:
   contents: read
 
@@ -71,7 +66,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node.js
@@ -100,33 +94,17 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.test-command }}
 
+      - name: Upload coverage report
+        if: inputs.coverage-artifact-name != '' && inputs.test-command != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.coverage-artifact-name }}
+          path: ${{ inputs.working-directory }}/${{ inputs.coverage-path }}
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Build or check production source
         if: inputs.build-command != ''
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.build-command }}
 
-      - name: Validate SonarQube configuration
-        if: inputs.run-sonarqube
-        shell: bash
-        env:
-          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${SONAR_HOST_URL}" ]]; then
-            echo "::error::sonar-host-url is required when run-sonarqube is true."
-            exit 1
-          fi
-          if [[ -z "${SONAR_TOKEN}" ]]; then
-            echo "::error::SONAR_TOKEN is required when run-sonarqube is true."
-            exit 1
-          fi
-
-      - name: Run SonarQube analysis
-        if: inputs.run-sonarqube
-        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
-        with:
-          projectBaseDir: ${{ inputs.working-directory }}
-        env:
-          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

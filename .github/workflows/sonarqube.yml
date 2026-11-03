@@ -1,0 +1,80 @@
+name: SonarQube Scan
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory containing sonar-project.properties.
+        type: string
+        required: false
+        default: "."
+      sonar-host-url:
+        description: SonarQube server URL.
+        type: string
+        required: true
+      coverage-artifact-name:
+        description: Coverage artifact produced by a preceding CI job. Leave empty when coverage is not required.
+        type: string
+        required: false
+        default: ""
+      coverage-download-path:
+        description: Destination for the coverage artifact, relative to working-directory.
+        type: string
+        required: false
+        default: "."
+      timeout-minutes:
+        description: Maximum duration of the SonarQube job.
+        type: number
+        required: false
+        default: 15
+    secrets:
+      SONAR_TOKEN:
+        description: SonarQube authentication token.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: SonarQube analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download coverage report
+        if: inputs.coverage-artifact-name != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.coverage-artifact-name }}
+          path: ${{ inputs.working-directory }}/${{ inputs.coverage-download-path }}
+
+      - name: Validate SonarQube configuration
+        shell: bash
+        env:
+          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SONAR_HOST_URL}" ]]; then
+            echo "::error::sonar-host-url must not be empty."
+            exit 1
+          fi
+          if [[ -z "${SONAR_TOKEN}" ]]; then
+            echo "::error::SONAR_TOKEN must not be empty."
+            exit 1
+          fi
+
+      - name: Run SonarQube analysis
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
+        with:
+          projectBaseDir: ${{ inputs.working-directory }}
+        env:
+          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
