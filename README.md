@@ -12,6 +12,7 @@ this repository owns the repeatable implementation.
 | `python-ci.yml` | notification-service | Install, format, lint, test, compile, and optionally scan with SonarQube |
 | `ecr-publish.yml` | backend, notification-service | Build a container, fail on high/critical vulnerabilities, assume AWS credentials with OIDC, and push an immutable ECR image |
 | `s3-cloudfront-deploy.yml` | frontend | Build and scan static assets, upload them to S3 with cache headers, and invalidate CloudFront |
+| `dependabot-auto-merge.yml` | all repositories | Verify Dependabot metadata, approve eligible patch/minor updates, and enable auto-merge |
 
 Reusable workflows must stay directly under `.github/workflows`; GitHub does not
 load reusable workflows from subdirectories.
@@ -252,6 +253,57 @@ jobs:
       aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
       environment-name: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
 ```
+
+## Dependabot automatic PRs and auto-merge
+
+Dependabot configuration is repository-specific, so it cannot be inherited from a
+reusable workflow. Copy one of these templates into each caller repository as
+`.github/dependabot.yml`:
+
+- [`examples/dependabot-node.yml`](examples/dependabot-node.yml) for frontend and backend.
+- [`examples/dependabot-python.yml`](examples/dependabot-python.yml) for notification-service.
+
+Then add this caller as `.github/workflows/dependabot-auto-merge.yml` in each
+repository:
+
+```yaml
+name: Dependabot auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    uses: tikto-calender/reusable-workflow/.github/workflows/dependabot-auto-merge.yml@v1
+    with:
+      target-branch: dev
+      allow-patch: true
+      allow-minor: true
+      allow-major: false
+      auto-approve: true
+      merge-method: squash
+```
+
+This workflow never checks out or executes code from the pull request. It verifies
+Dependabot metadata and refuses PRs containing maintainer changes. The supplied
+Dependabot templates target `dev`, and the reusable workflow also checks that the
+PR base branch is exactly `dev`. Patch and minor updates can therefore auto-merge
+only into `dev`; `main`/production and major updates always require manual review.
+
+Before enabling it, configure the caller repository:
+
+1. Enable **Settings → General → Pull Requests → Allow auto-merge**.
+2. Enable **Settings → Actions → General → Workflow permissions → Allow GitHub
+   Actions to create and approve pull requests** if automatic approval is desired.
+3. Protect `dev` and `main` with required CI status checks. Auto-merge into `dev`
+   will wait for those checks instead of bypassing them. Promotion to `main`
+   remains manual.
 
 ## Notes
 
