@@ -1,0 +1,132 @@
+name: Node CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version used by the quality job.
+        type: string
+        required: false
+        default: "22"
+      working-directory:
+        description: Directory containing package.json and package-lock.json.
+        type: string
+        required: false
+        default: "."
+      install-command:
+        description: Command used to install dependencies.
+        type: string
+        required: false
+        default: npm ci
+      format-command:
+        description: Formatting check command. Leave empty to skip.
+        type: string
+        required: false
+        default: npm run format:check
+      lint-command:
+        description: Lint command. Leave empty to skip.
+        type: string
+        required: false
+        default: npm run lint
+      test-command:
+        description: Test command. Leave empty to skip.
+        type: string
+        required: false
+        default: npm test
+      build-command:
+        description: Build or syntax-check command. Leave empty to skip.
+        type: string
+        required: false
+        default: ""
+      run-sonarqube:
+        description: Run the SonarQube scanner after all quality checks pass.
+        type: boolean
+        required: false
+        default: false
+      sonar-host-url:
+        description: SonarQube server URL. Required when run-sonarqube is true.
+        type: string
+        required: false
+        default: ""
+      timeout-minutes:
+        description: Maximum duration of the quality job.
+        type: number
+        required: false
+        default: 20
+    secrets:
+      SONAR_TOKEN:
+        description: SonarQube authentication token.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Node quality checks
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
+
+      - name: Check formatting
+        if: inputs.format-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.format-command }}
+
+      - name: Lint
+        if: inputs.lint-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.lint-command }}
+
+      - name: Run tests
+        if: inputs.test-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.test-command }}
+
+      - name: Build or check production source
+        if: inputs.build-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.build-command }}
+
+      - name: Validate SonarQube configuration
+        if: inputs.run-sonarqube
+        shell: bash
+        env:
+          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SONAR_HOST_URL}" ]]; then
+            echo "::error::sonar-host-url is required when run-sonarqube is true."
+            exit 1
+          fi
+          if [[ -z "${SONAR_TOKEN}" ]]; then
+            echo "::error::SONAR_TOKEN is required when run-sonarqube is true."
+            exit 1
+          fi
+
+      - name: Run SonarQube analysis
+        if: inputs.run-sonarqube
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
+        with:
+          projectBaseDir: ${{ inputs.working-directory }}
+        env:
+          SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
