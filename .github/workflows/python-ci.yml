@@ -1,5 +1,4 @@
 name: Python CI
-
 on:
   workflow_call:
     inputs:
@@ -12,7 +11,7 @@ on:
         description: Directory containing the Python service.
         type: string
         required: false
-        default: "."
+        default: .
       dependency-file:
         description: Dependency file used for pip caching.
         type: string
@@ -60,56 +59,55 @@ on:
         default: 20
 permissions:
   contents: read
-
 jobs:
   quality:
-    name: Python quality checks
+    name: ${{ matrix.check }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
-
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: format
+            command: ${{ inputs.format-command }}
+          - check: lint
+            command: ${{ inputs.lint-command }}
+          - check: test
+            command: ${{ inputs.test-command }}
+          - check: compile
+            command: ${{ inputs.compile-command }}
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
       - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ inputs.python-version }}
           cache: pip
           cache-dependency-path: ${{ inputs.working-directory }}/${{ inputs.dependency-file }}
-
       - name: Install dependencies
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.install-command }}
-
-      - name: Check formatting
-        if: inputs.format-command != ''
+      - name: Run ${{ matrix.check }}
+        if: matrix.command != ''
         working-directory: ${{ inputs.working-directory }}
-        run: ${{ inputs.format-command }}
-
-      - name: Lint
-        if: inputs.lint-command != ''
-        working-directory: ${{ inputs.working-directory }}
-        run: ${{ inputs.lint-command }}
-
-      - name: Run tests
-        if: inputs.test-command != ''
-        working-directory: ${{ inputs.working-directory }}
-        run: ${{ inputs.test-command }}
-
+        run: ${{ matrix.command }}
       - name: Upload coverage report
-        if: inputs.coverage-artifact-name != '' && inputs.test-command != ''
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.check == 'test' && inputs.coverage-artifact-name != '' && inputs.test-command != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ${{ inputs.coverage-artifact-name }}
           path: ${{ inputs.working-directory }}/${{ inputs.coverage-path }}
           if-no-files-found: error
           retention-days: 1
-
-      - name: Compile production source
-        if: inputs.compile-command != ''
-        working-directory: ${{ inputs.working-directory }}
-        run: ${{ inputs.compile-command }}
-
+  result:
+    name: CI result
+    needs: quality
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULT: ${{ needs.quality.result }}
+        run: test "$RESULT" = success

@@ -1,372 +1,95 @@
-# Flavoriy reusable GitHub Actions workflows
+# Shared CI/CD workflows
 
-Shared CI/CD building blocks for the Flavoriy frontend, backend, and notification
-service repositories. Caller repositories own their triggers and branch filters;
-this repository owns the repeatable implementation.
+Application repositories own triggers and inputs; this repository owns the jobs.
 
-## Workflows
+| Workflow                | Purpose                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------ |
+| `node-ci.yml`           | Parallel format, lint, test, build/syntax checks; one `CI result` gate                           |
+| `python-ci.yml`         | Parallel format, lint, test, compile checks; one `CI result` gate                                |
+| `container-publish.yml` | Build, Trivy scan, push immutable `sha-<full SHA>` to ECR; return digest URI                     |
+| `ecs-deploy.yml`        | Register task revision, update service, wait and verify requested revision, optional HTTPS smoke |
+| `container-release.yml` | Validate release tag and successful dev CD, promote digest, open production GitOps PR            |
+| `frontend-delivery.yml` | Build/deploy S3 on dev; promote the archived dev artifact on release tags                        |
 
-| Workflow | Intended callers | Purpose |
-| --- | --- | --- |
-| `node-ci.yml` | frontend, backend | Install, format, lint, unit test, build/check, and optionally publish coverage |
-| `python-ci.yml` | notification-service | Install, format, lint, unit test, compile, and optionally publish coverage |
-| `sonarqube.yml` | all repositories | Download coverage from a CI job and run the independent SonarQube quality gate |
-| `ecr-publish.yml` | backend, notification-service | Build a container, fail on high/critical vulnerabilities, assume AWS credentials with OIDC, and push an immutable ECR image |
-| `s3-cloudfront-deploy.yml` | frontend | Build and scan static assets, upload them to S3 with cache headers, and invalidate CloudFront |
-| `dependabot-auto-merge.yml` | all repositories | Verify Dependabot metadata, approve eligible patch/minor updates, and enable auto-merge |
+`sonarqube.yml` and `dependabot-auto-merge.yml` remain available for other callers;
+the basic application pipelines do not use automatic merging.
 
-Reusable workflows must stay directly under `.github/workflows`; GitHub does not
-load reusable workflows from subdirectories.
+## Flow
 
-## Versioning
-
-Create immutable releases such as `v1.0.0`, then maintain a moving major tag such
-as `v1` for convenient upgrades. Callers below use `@v1`. For the strongest supply
-chain protection, replace `v1` with the full commit SHA of the release.
-
-Do not point production deployment workflows at `@main`.
-
-## Required repository configuration
-
-The three caller repositories need these values where applicable:
-
-| Name | Kind | Used by |
-| --- | --- | --- |
-| `SONAR_TOKEN` | Repository or environment secret | Optional SonarQube scan |
-| `SONAR_HOST_URL` | Repository variable | Optional SonarQube scan |
-| `AWS_BUILD_ROLE_ARN` | Repository/environment variable | Backend and notification ECR publish |
-| `AWS_DEPLOY_ROLE_ARN` | Repository/environment variable | Frontend S3 deploy |
-| `AWS_REGION` | Repository/environment variable | AWS workflows; examples fall back to `ap-southeast-2` |
-| `FRONTEND_BUCKET_NAME` | Environment variable | Frontend S3 deploy |
-| `CLOUDFRONT_DISTRIBUTION_ID` | Environment variable | Frontend cache invalidation |
-
-The AWS roles must trust the caller repositories' GitHub OIDC subjects. No static
-AWS access keys are required. The caller must grant `id-token: write` to jobs that
-invoke an AWS workflow.
-
-If this repository is private, configure **Settings → Actions → General → Access**
-so the caller repositories can use its workflows. Cross-organization callers need
-this repository to be public or an access arrangement supported by GitHub.
-
-## Caller: backend CI
-
-Save as `.github/workflows/ci.yml` in the backend repository:
-
-```yaml
-name: CI
-
-on:
-  pull_request:
-    branches: [dev, main]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  quality:
-    uses: tikto-calender/reusable-workflow/.github/workflows/node-ci.yml@v1
-    with:
-      install-command: npm ci --ignore-scripts
-      build-command: npm run syntax
-      coverage-artifact-name: backend-coverage
-
-  sonar:
-    needs: quality
-    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
-    with:
-      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
-      coverage-artifact-name: backend-coverage
-      coverage-download-path: coverage
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+```text
+PR -> dev: parallel quality checks -> CI result -> manual merge
+Push dev: build -> scan -> ECR -> ECS dev -> verify rollout
+Tag vX.Y.Z: validate tested commit on main -> approve prod -> promote digest -> GitOps PR
+Merge GitOps PR: Argo CD syncs production EKS -> inspect rollout health
+Frontend: build -> S3 dev; release downloads same build -> S3 prod -> smoke
 ```
 
-## Caller: backend CD
+CI only runs on application PRs into `dev`. CD runs for every dev push, including
+documentation changes, so every releasable commit has an unambiguous image/build.
+Independent CI tasks run on separate runners; each installs dependencies with a
+package-manager cache. A failed task does not cancel the other diagnostics.
 
-Save as `.github/workflows/cd.yml` in the backend repository:
+## Callers and publication
 
-```yaml
-name: Build, scan and push image
+Callers contain only events, permissions, concurrency and `uses`/inputs. Publish
+this repository first. The workspace callers currently reference `@main` because
+these changes have no published shared commit yet. Before production rollout,
+replace `@main` with the published shared commit SHA (or maintain a protected
+version tag). Do not invent a SHA for unpublished local changes.
 
-on:
-  push:
-    branches: [dev, main]
-  workflow_dispatch:
+Node CI retains its command/version/working-directory/coverage inputs. Python CI
+retains equivalent inputs. Empty commands are skipped. CI uses the PR merge
+result; CD checks out the dev push; release checks out the tagged commit.
 
-permissions:
-  contents: read
+## Required settings
 
-concurrency:
-  group: cd-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+| Scope                            | Setting                                                                                        |
+| -------------------------------- | ---------------------------------------------------------------------------------------------- |
+| All repos                        | `AWS_REGION=ap-southeast-2`                                                                    |
+| BE/notification repo             | `AWS_BUILD_ROLE_ARN` from shared Terraform                                                     |
+| BE/notification dev Environment  | `AWS_DEPLOY_ROLE_ARN`, `ECS_CLUSTER`, `ECS_SERVICE`                                            |
+| BE/notification dev Environment  | Optional `SMOKE_URL`, returning HTTPS JSON with `status: ok`                                   |
+| BE/notification prod Environment | `GITOPS_TOKEN`: fine-grained token with Contents/Pull requests write on the GitOps repo        |
+| BE/notification prod Environment | Optional `GITOPS_REPOSITORY`; defaults to `Flavoriy/gitops-manifest`                           |
+| FE dev and prod Environments     | `AWS_DEPLOY_ROLE_ARN`, `FRONTEND_BUCKET_NAME`, `CLOUDFRONT_DISTRIBUTION_ID`, `APPLICATION_URL` |
 
-jobs:
-  quality:
-    uses: tikto-calender/reusable-workflow/.github/workflows/node-ci.yml@v1
-    with:
-      install-command: npm ci --ignore-scripts
-      build-command: npm run syntax
-      coverage-artifact-name: backend-coverage
+Backend/notification production is EKS, not ECS. The release caller identifies the
+existing container in the GitOps patch (`tikto` for backend, `notification` for
+notification). Review the production workload configuration when merging the PR.
+GitOps base/overlay/patch can be overridden through reusable inputs.
 
-  sonar:
-    needs: quality
-    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
-    with:
-      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
-      coverage-artifact-name: backend-coverage
-      coverage-download-path: coverage
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+The build role needs ECR push, describe and pull/manifest access. Trust dev branch
+OIDC subjects for build and prod Environment subjects for promotion. ECS deploy
+uses the dev Environment role and needs DescribeServices, DescribeTaskDefinition,
+RegisterTaskDefinition, UpdateService and PassRole for its ECS roles. Terraform
+contains these policies; apply the updated shared/dev stacks before using CD.
 
-  publish:
-    needs: [quality, sonar]
-    permissions:
-      contents: read
-      id-token: write
-    uses: tikto-calender/reusable-workflow/.github/workflows/ecr-publish.yml@v1
-    with:
-      aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
-      aws-role-arn: ${{ vars.AWS_BUILD_ROLE_ARN }}
-      ecr-repository: tikto/backend
-      service-name: backend
-```
+Protect `dev` with `checks / CI result` and up-to-date branches. Protect `main`,
+version tags and `prod` approval. Restrict `dev` deployments to dev branch and
+`prod` deployments to release tags using GitHub Environment policies. For source
+promotion, preserve the tested SHA (fast-forward main); a squash/merge-created
+commit without its own dev deployment cannot be released.
 
-## Caller: notification-service CI
+## Release and retry
 
-Save as `.github/workflows/ci.yml` in the notification-service repository:
+After dev testing, fast-forward main to the tested commit, push main, then push
+`vMAJOR.MINOR.PATCH` pointing to that exact commit. Pushing main does not deploy.
+Release requires a successful `cd.yml` push run for that SHA on dev. It never
+rebuilds an image or the frontend. Existing image version tags must match the
+source digest. Retrying promotion updates the same GitOps branch/PR.
 
-```yaml
-name: CI
+Frontend artifacts are retained for 90 days (subject to repository limits).
+Expired artifacts must be regenerated by rerunning dev CD before release.
+Old hashed S3 assets are not deleted during deployment.
 
-on:
-  pull_request:
-    branches: [dev, main]
-  workflow_dispatch:
+An ECS stability waiter can succeed after rollback: the workflow also requires
+the requested task revision, positive desired count and completed rollout.
+Service Connect sidecar/config, task roles, CPU, memory, ports and environment
+are preserved from the running task definition. Changing those settings through
+Terraform requires deliberately rolling out the resulting task revision; ignore
+changes prevents Terraform from reverting an application deployment.
 
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  quality:
-    uses: tikto-calender/reusable-workflow/.github/workflows/python-ci.yml@v1
-    with:
-      coverage-artifact-name: notification-coverage
-
-  sonar:
-    needs: quality
-    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
-    with:
-      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
-      coverage-artifact-name: notification-coverage
-      coverage-download-path: "."
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-```
-
-## Caller: notification-service CD
-
-Save as `.github/workflows/cd.yml` in the notification-service repository:
-
-```yaml
-name: Build, scan and push image
-
-on:
-  push:
-    branches: [dev, main]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: cd-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
-jobs:
-  quality:
-    uses: tikto-calender/reusable-workflow/.github/workflows/python-ci.yml@v1
-    with:
-      coverage-artifact-name: notification-coverage
-
-  sonar:
-    needs: quality
-    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
-    with:
-      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
-      coverage-artifact-name: notification-coverage
-      coverage-download-path: "."
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  publish:
-    needs: [quality, sonar]
-    permissions:
-      contents: read
-      id-token: write
-    uses: tikto-calender/reusable-workflow/.github/workflows/ecr-publish.yml@v1
-    with:
-      aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
-      aws-role-arn: ${{ vars.AWS_BUILD_ROLE_ARN }}
-      ecr-repository: tikto/notification
-      service-name: notification
-```
-
-## Caller: frontend CI
-
-Save as `.github/workflows/ci.yml` in the frontend repository:
-
-```yaml
-name: CI
-
-on:
-  pull_request:
-    branches: [dev, main]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  quality:
-    uses: tikto-calender/reusable-workflow/.github/workflows/node-ci.yml@v1
-    with:
-      build-command: npm run build
-      coverage-artifact-name: frontend-coverage
-
-  sonar:
-    needs: quality
-    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
-    with:
-      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
-      coverage-artifact-name: frontend-coverage
-      coverage-download-path: coverage
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-```
-
-## Caller: frontend CD
-
-Save as `.github/workflows/cd.yml` in the frontend repository:
-
-```yaml
-name: Build and deploy frontend
-
-on:
-  push:
-    branches: [dev, main]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: cd-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
-jobs:
-  quality:
-    uses: tikto-calender/reusable-workflow/.github/workflows/node-ci.yml@v1
-    with:
-      # The deployment job performs the production build after this quality gate.
-      build-command: ""
-      coverage-artifact-name: frontend-coverage
-
-  sonar:
-    needs: quality
-    uses: tikto-calender/reusable-workflow/.github/workflows/sonarqube.yml@v1
-    with:
-      sonar-host-url: ${{ vars.SONAR_HOST_URL }}
-      coverage-artifact-name: frontend-coverage
-      coverage-download-path: coverage
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  deploy:
-    needs: [quality, sonar]
-    permissions:
-      contents: read
-      id-token: write
-    uses: tikto-calender/reusable-workflow/.github/workflows/s3-cloudfront-deploy.yml@v1
-    with:
-      aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
-      environment-name: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-```
-
-The `sonar` job is optional. To run only lint/unit tests/build, remove the `sonar`
-job and the `coverage-artifact-name` input. Keeping SonarQube separate means its
-secret and scanner are not coupled to the base CI workflows. Coverage is passed
-between jobs as a one-day artifact, so unit tests do not run twice.
-
-## Dependabot automatic PRs and auto-merge
-
-Dependabot configuration is repository-specific, so it cannot be inherited from a
-reusable workflow. Copy one of these templates into each caller repository as
-`.github/dependabot.yml`:
-
-- [`examples/dependabot-node.yml`](examples/dependabot-node.yml) for frontend and backend.
-- [`examples/dependabot-python.yml`](examples/dependabot-python.yml) for notification-service.
-
-Then add this caller as `.github/workflows/dependabot-auto-merge.yml` in each
-repository:
-
-```yaml
-name: Dependabot auto-merge
-
-on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
-
-permissions:
-  contents: write
-  pull-requests: write
-
-jobs:
-  dependabot:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
-    uses: tikto-calender/reusable-workflow/.github/workflows/dependabot-auto-merge.yml@v1
-    with:
-      target-branch: dev
-      allow-patch: true
-      allow-minor: true
-      allow-major: false
-      auto-approve: true
-      merge-method: squash
-```
-
-This workflow never checks out or executes code from the pull request. It verifies
-Dependabot metadata and refuses PRs containing maintainer changes. The supplied
-Dependabot templates target `dev`, and the reusable workflow also checks that the
-PR base branch is exactly `dev`. Patch and minor updates can therefore auto-merge
-only into `dev`; `main`/production and major updates always require manual review.
-
-Before enabling it, configure the caller repository:
-
-1. Enable **Settings → General → Pull Requests → Allow auto-merge**.
-2. Enable **Settings → Actions → General → Workflow permissions → Allow GitHub
-   Actions to create and approve pull requests** if automatic approval is desired.
-3. Protect `dev` and `main` with required CI status checks. Auto-merge into `dev`
-   will wait for those checks instead of bypassing them. Promotion to `main`
-   remains manual.
-
-## Notes
-
-- A called workflow checks out the caller repository, not this repository.
-- Workflow-level `env` values from a caller are not propagated to a called workflow;
-  pass configuration through `with`, `secrets`, or repository/environment variables.
-- Secrets only flow to directly called workflows. These examples pass only the
-  SonarQube secret instead of using `secrets: inherit`.
-- Branch and path triggers belong in caller workflows because reusable workflows
-  are invoked through `workflow_call`.
+A successful container release means the production promotion PR was opened.
+Argo health/analysis is the authority on actual production rollout. Revert the
+GitOps image change for code rollback; data/schema rollback is a separate task.
+FE rollback can restore a retained build with the same assets-before-HTML order.

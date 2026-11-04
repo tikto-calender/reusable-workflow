@@ -1,0 +1,77 @@
+name: Deploy image to ECS
+on:
+  workflow_call:
+    inputs:
+      image:
+        type: string
+        required: true
+      container:
+        type: string
+        required: true
+      environment:
+        type: string
+        default: dev
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    env:
+      CLUSTER: ${{ vars.ECS_CLUSTER }}
+      SERVICE: ${{ vars.ECS_SERVICE }}
+      CONTAINER: ${{ inputs.container }}
+      IMAGE: ${{ inputs.image }}
+      SMOKE_URL: ${{ vars.SMOKE_URL }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+      - name: Register revision and roll out
+        id: rollout
+        run: |
+          set -euo pipefail
+          : "${CLUSTER:?Set ECS_CLUSTER}" "${SERVICE:?Set ECS_SERVICE}"
+          [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]]
+          aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" > service-before.json
+          jq -e '.failures | length == 0' service-before.json
+          old=$(jq -er '.services[0].taskDefinition' service-before.json)
+          aws ecs describe-task-definition --task-definition "$old" --query taskDefinition > current.json
+          jq -e --arg name "$CONTAINER" '[.containerDefinitions[] | select(.name == $name)] | length == 1' current.json
+          jq --arg name "$CONTAINER" --arg image "$IMAGE" '
+            del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy,.deregisteredAt)
+            | (.containerDefinitions[] | select(.name == $name) | .image) = $image
+          ' current.json > task-definition.json
+          revision=$(aws ecs register-task-definition --cli-input-json file://task-definition.json --query taskDefinition.taskDefinitionArn --output text)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$revision" > service-update.json
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" > service-after.json
+          # Stability alone can mean ECS rolled back. Require the requested revision.
+          jq -e --arg revision "$revision" '.failures | length == 0' service-after.json
+          jq -e --arg revision "$revision" '.services[0] | .taskDefinition == $revision and .desiredCount > 0 and .runningCount == .desiredCount and (.deployments | length == 1) and .deployments[0].rolloutState == "COMPLETED"' service-after.json
+      - name: Smoke test
+        if: env.SMOKE_URL != ''
+        run: |
+          set -euo pipefail
+          [[ "$SMOKE_URL" == https://* ]]
+          curl --fail --silent --show-error --retry 8 --retry-all-errors --retry-delay 5 --max-time 15 "$SMOKE_URL" > smoke.json
+          jq -e '.status == "ok"' smoke.json
+      - name: Deployment summary
+        env:
+          REVISION: ${{ steps.rollout.outputs.revision }}
+        run: echo "Deployed $IMAGE to $CLUSTER/$SERVICE ($REVISION)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save rollout diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ecs-${{ inputs.environment }}-${{ github.run_attempt }}
+          path: |-
+            service-*.json
+            task-definition.json
+            smoke.json
+          retention-days: 7
+          if-no-files-found: ignore

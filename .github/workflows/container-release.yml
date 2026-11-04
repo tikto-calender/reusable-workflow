@@ -1,0 +1,152 @@
+name: Promote tested image and propose production rollout
+on:
+  workflow_call:
+    inputs:
+      repository:
+        type: string
+        required: true
+      container:
+        type: string
+        required: true
+      component:
+        type: string
+        required: true
+      gitops-repository:
+        type: string
+        required: true
+      gitops-base:
+        type: string
+        default: main
+      gitops-overlay:
+        type: string
+        default: apps/tikto/overlays/prod
+      gitops-patch:
+        type: string
+        default: apps/tikto/overlays/prod/patch-image.yaml
+    secrets:
+      GITOPS_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: source
+        name: Require release tag on main with a successful dev deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+            commit=$(git rev-parse HEAD)
+          git merge-base --is-ancestor "$commit" origin/dev
+          git merge-base --is-ancestor "$commit" origin/main
+          runs=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/cd.yml/runs" -f head_sha="$commit" -f branch=dev -f event=push -f status=success -f per_page=100)
+          run=$(jq -er '[.workflow_runs[] | select(.head_sha == "'"$commit"'")][0].id' <<< "$runs")
+          echo "sha=$commit" >> "$GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+  release:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: prod
+    env:
+      REPOSITORY: ${{ inputs.repository }}
+      SOURCE_SHA: ${{ needs.validate.outputs.sha }}
+    steps:
+      - name: Require GitOps credentials before promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: test -n "$GH_TOKEN"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+      - id: login
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd
+      - id: image
+        name: Promote the tested digest without rebuilding
+        run: |
+          set -euo pipefail
+          aws ecr batch-get-image --repository-name "$REPOSITORY" --image-ids "imageTag=sha-$SOURCE_SHA" > source.json
+          digest=$(jq -er '.images[0].imageId.imageDigest' source.json)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          jq -er '.images[0].imageManifest' source.json > manifest.json
+          aws ecr batch-get-image --repository-name "$REPOSITORY" --image-ids "imageTag=$GITHUB_REF_NAME" > release.json
+          jq -e 'all(.failures[]; .failureCode == "ImageNotFound")' release.json
+          existing=$(jq -r '.images[0].imageId.imageDigest // empty' release.json)
+          if [[ -n "$existing" ]]; then
+            test "$existing" = "$digest"
+          else
+            aws ecr put-image --repository-name "$REPOSITORY" --image-tag "$GITHUB_REF_NAME" --image-manifest file://manifest.json > promoted.json
+          fi
+          echo "image=${{ steps.login.outputs.registry }}/$REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+      - name: Checkout GitOps configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.gitops-repository }}
+          ref: ${{ inputs.gitops-base }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+          persist-credentials: true
+      - name: Open production promotion PR
+        working-directory: gitops
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          COMPONENT: ${{ inputs.component }}
+          GITOPS_REPO: ${{ inputs.gitops-repository }}
+          GITOPS_BASE: ${{ inputs.gitops-base }}
+          PATCH_FILE: ${{ inputs.gitops-patch }}
+          OVERLAY: ${{ inputs.gitops-overlay }}
+          TARGET_CONTAINER: ${{ inputs.container }}
+        run: |
+          set -euo pipefail
+          branch="release/$COMPONENT/$GITHUB_REF_NAME"
+          merged=$(gh pr list --repo "$GITOPS_REPO" --head "$branch" --base "$GITOPS_BASE" --state merged --json url --jq '.[0].url // empty')
+          if [[ -n "$merged" ]]; then
+            echo "Promotion PR already merged: $merged" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git fetch origin "$GITOPS_BASE"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch"
+            git checkout -B "$branch" FETCH_HEAD
+          else
+            git checkout -b "$branch" "origin/$GITOPS_BASE"
+          fi
+          python - <<'PY'
+          import os, re
+          from pathlib import Path
+          path = Path(os.environ['PATCH_FILE'])
+          text = path.read_text()
+          name = re.escape(os.environ['TARGET_CONTAINER'])
+          pattern = r'(^[ \t]*- name: ' + name + r'\s*\n[ \t]*image: )[^\n]+'
+          text, count = re.subn(pattern, lambda m: m[1] + os.environ['IMAGE'], text, flags=re.M)
+          if count != 1:
+              raise SystemExit(f'Expected one target container, found {count}')
+          path.write_text(text)
+          PY
+          kubectl kustomize "$OVERLAY" > "$RUNNER_TEMP/rendered-production.yaml"
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add "$PATCH_FILE"
+          if ! git diff --cached --quiet; then
+            git commit -m "release: $COMPONENT $GITHUB_REF_NAME"
+            git push origin "$branch"
+          fi
+          printf 'Promote %s at source commit %s.\n\nImage: %s\n\nMerge this PR to let Argo CD roll out production; inspect Argo health before considering the deployment complete.\n' "$GITHUB_REF_NAME" "$SOURCE_SHA" "$IMAGE" > "$RUNNER_TEMP/release-body.md"
+          url=$(gh pr list --repo "$GITOPS_REPO" --head "$branch" --base "$GITOPS_BASE" --state open --json url --jq '.[0].url // empty')
+          if [[ -z "$url" ]]; then
+            url=$(gh pr create --repo "$GITOPS_REPO" --head "$branch" --base "$GITOPS_BASE" --title "release: $COMPONENT $GITHUB_REF_NAME" --body-file "$RUNNER_TEMP/release-body.md")
+          fi
+          echo "Promoted $IMAGE; production rollout awaits GitOps PR: $url" >> "$GITHUB_STEP_SUMMARY"
