@@ -1,4 +1,4 @@
-name: Promote Dev digest to Prod
+name: Promote Development to Production
 on:
   workflow_call:
     inputs:
@@ -24,57 +24,58 @@ jobs:
     timeout-minutes: 10
     environment: prod
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
         with:
           repository: ${{ inputs.gitops-repository }}
           token: ${{ secrets.GITOPS_TOKEN }}
           ref: main
-      - name: Open Prod promotion PR
+
+      - name: Validate promotion prerequisites
         env:
           COMPONENT: ${{ inputs.component }}
           DIGEST: ${{ inputs.digest }}
-          GITOPS_REPOSITORY: ${{ inputs.gitops-repository }}
-          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
         run: |
-          set -euo pipefail
           case "$COMPONENT" in backend|notification|frontend) ;; *) exit 1 ;; esac
           [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-          export IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$COMPONENT@$DIGEST"
-          dev_image=$(sed -nE 's/^[[:space:]]+image: (.+)$/\1/p' "apps/tikto/overlays/dev/$COMPONENT-image.yaml")
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE="ghcr.io/${owner}/${COMPONENT}@${DIGEST}"
+          dev_image=$(sed -nE 's/^[[:space:]]+image: (.+)$/\1/p' "apps/tikto/overlays/dev/${COMPONENT}-image.yaml")
           if [[ "$dev_image" != "$IMAGE" ]]; then
-            echo "The requested digest is not the current Dev manifest image." >&2
+            echo "::error::The requested digest is not the current Dev manifest image."
             exit 1
           fi
 
-          export PATCH="apps/tikto/overlays/prod/$COMPONENT-image.yaml"
-          branch="promote/$COMPONENT/${DIGEST#sha256:}/$GITHUB_RUN_ID"
-          if [[ -n "$(gh pr list --repo "$GITOPS_REPOSITORY" --head "$branch" --base main --json url --jq '.[0].url // empty')" ]]; then
-            echo "An open PR already exists for this promotion."
+      - name: Update Prod overlay image
+        env:
+          PATCH: "apps/tikto/overlays/prod/${{ inputs.component }}-image.yaml"
+          COMPONENT: ${{ inputs.component }}
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE="ghcr.io/${owner}/${COMPONENT}@${DIGEST}"
+          export IMAGE
+          python -c '
+          import os, re, pathlib
+          p = pathlib.Path(os.environ["PATCH"])
+          text, count = re.subn(r"(?m)^(\s+image: )\S+$", r"\g<1>" + os.environ["IMAGE"], p.read_text())
+          assert count == 1, "Expected exactly one image field"
+          p.write_text(text)
+          '
+
+      - name: Commit and push straight to main
+        env:
+          PATCH: "apps/tikto/overlays/prod/${{ inputs.component }}-image.yaml"
+          COMPONENT: ${{ inputs.component }}
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$PATCH"
+          if git diff --staged --quiet; then
+            echo "No changes to deploy."
             exit 0
           fi
-
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path(os.environ["PATCH"])
-          image = os.environ["IMAGE"]
-          text, count = re.subn(r"(?m)^(\s+image: )\S+$", lambda match: match[1] + image, path.read_text())
-          if count != 1:
-              raise SystemExit("Expected exactly one image field")
-          path.write_text(text)
-          PY
-          git add "$PATCH"
-          if git diff --cached --quiet; then exit 0; fi
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git commit -m "prod: promote $COMPONENT $DIGEST"
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-            git fetch origin "$branch"
-            test "$(git show "FETCH_HEAD:$PATCH")" = "$(git show "HEAD:$PATCH")"
-          else
-            git push origin HEAD:"refs/heads/$branch"
-          fi
-          gh pr create --repo "$GITOPS_REPOSITORY" --head "$branch" --base main \
-            --title "Promote $COMPONENT to Prod" --body "Promote the Dev image $IMAGE."
+          git push origin main
