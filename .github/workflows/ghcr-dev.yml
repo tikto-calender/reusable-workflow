@@ -34,13 +34,13 @@ jobs:
           COMPONENT: ${{ inputs.component }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" != refs/heads/dev ]]; then
-            echo "::error::Select the dev branch when running this workflow."
-            exit 1
-          fi
+          case "$GITHUB_REF" in
+            refs/heads/dev|refs/heads/feat/*) ;;
+            *) echo "::error::Select dev or a feat/ branch."; exit 1 ;;
+          esac
           case "$COMPONENT" in backend|notification|frontend) ;; *) exit 1 ;; esac
           tag="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$COMPONENT:sha-$GITHUB_SHA"
-          docker build --platform linux/amd64 --tag "$tag" .
+          docker build --pull --platform linux/amd64 --tag "$tag" .
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Scan image
         uses: aquasecurity/trivy-action@v0.36.0
@@ -50,6 +50,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Push image and capture digest
+        if: github.ref == 'refs/heads/dev'
         id: push
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,6 +64,7 @@ jobs:
           echo "image=${IMAGE_TAG%:*}@$digest" >> "$GITHUB_OUTPUT"
 
   gitops:
+    if: github.ref == 'refs/heads/dev'
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
