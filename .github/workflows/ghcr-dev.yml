@@ -40,7 +40,9 @@ jobs:
           esac
           case "$COMPONENT" in backend|notification|frontend) ;; *) exit 1 ;; esac
           tag="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$COMPONENT:sha-$GITHUB_SHA"
-          docker build --pull --platform linux/amd64 --tag "$tag" .
+          docker build --pull --platform linux/amd64 \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "$tag" .
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Scan image
         uses: aquasecurity/trivy-action@v0.36.0
@@ -58,7 +60,12 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker push "$IMAGE_TAG" | tee "$RUNNER_TEMP/ghcr-push.log"
+          if ! docker push "$IMAGE_TAG" 2>&1 | tee "$RUNNER_TEMP/ghcr-push.log"; then
+            if grep -Eqi 'denied|unauthorized|forbidden' "$RUNNER_TEMP/ghcr-push.log"; then
+              echo "::error::GHCR rejected the push. Check organization package policy and grant this repository Write under the package's Manage Actions access settings."
+            fi
+            exit 1
+          fi
           digest=$(sed -nE 's/.*digest: (sha256:[a-f0-9]{64}).*/\1/p' "$RUNNER_TEMP/ghcr-push.log" | tail -n 1)
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           echo "image=${IMAGE_TAG%:*}@$digest" >> "$GITHUB_OUTPUT"
