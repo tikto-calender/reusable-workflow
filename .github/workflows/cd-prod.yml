@@ -40,8 +40,7 @@ jobs:
           case "$COMPONENT" in backend|notification|frontend) ;; *) exit 1 ;; esac
           [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
           export IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$COMPONENT@$DIGEST"
-          git fetch origin dev
-          dev_image=$(git show "FETCH_HEAD:apps/tikto/overlays/dev/$COMPONENT-image.yaml" | sed -nE 's/^[[:space:]]+image: (.+)$/\1/p')
+          dev_image=$(sed -nE 's/^[[:space:]]+image: (.+)$/\1/p' "apps/tikto/overlays/dev/$COMPONENT-image.yaml")
           if [[ "$dev_image" != "$IMAGE" ]]; then
             echo "The requested digest is not the current Dev manifest image." >&2
             exit 1

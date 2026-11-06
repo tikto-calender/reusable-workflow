@@ -1,0 +1,89 @@
+name: Deploy Dev with GitOps
+on:
+  workflow_call:
+    inputs:
+      component:
+        required: true
+        type: string
+      gitops-repository:
+        required: true
+        type: string
+    secrets:
+      GITOPS_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    uses: ./.github/workflows/push-ghcr.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      component: ${{ inputs.component }}
+
+  gitops:
+    if: github.ref == 'refs/heads/dev'
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops-repository }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          ref: main
+      - name: Open Dev image PR
+        env:
+          COMPONENT: ${{ inputs.component }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          GITOPS_REPOSITORY: ${{ inputs.gitops-repository }}
+        run: |
+          set -euo pipefail
+          if ! docker manifest inspect "$IMAGE" > /dev/null; then
+            echo "::error::The image must be publicly pullable from GHCR. Check the package visibility, then rerun the GitOps job."
+            exit 1
+          fi
+          if [[ "$(gh api "repos/$GITHUB_REPOSITORY/branches/dev" --jq .commit.sha)" != "$GITHUB_SHA" ]]; then
+            echo "A newer Dev commit superseded this build."
+            exit 0
+          fi
+
+          export GH_TOKEN="$GITOPS_TOKEN"
+          export PATCH="apps/tikto/overlays/dev/$COMPONENT-image.yaml"
+          branch="deploy-dev/$COMPONENT/$GITHUB_RUN_ID"
+          if [[ -n "$(gh pr list --repo "$GITOPS_REPOSITORY" --head "$branch" --base main --json url --jq '.[0].url // empty')" ]]; then
+            echo "A Dev image PR already exists."
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path(os.environ["PATCH"])
+          image = os.environ["IMAGE"]
+          text, count = re.subn(r"(?m)^(\s+image: )\S+$", lambda match: match[1] + image, path.read_text())
+          if count != 1:
+              raise SystemExit("Expected exactly one image field")
+          path.write_text(text)
+          PY
+          git add "$PATCH"
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "dev: deploy $COMPONENT $GITHUB_SHA"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch"
+            test "$(git show "FETCH_HEAD:$PATCH")" = "$(git show "HEAD:$PATCH")"
+          else
+            git push origin HEAD:"refs/heads/$branch"
+          fi
+          gh pr create --repo "$GITOPS_REPOSITORY" --head "$branch" --base main \
+            --title "Deploy $COMPONENT to Dev" --body "Update the Dev overlay to $IMAGE."

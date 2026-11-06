@@ -2,23 +2,22 @@
 
 Application repositories own triggers and inputs; this repository owns the jobs.
 
-| Workflow                | Purpose                                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------------------ |
-| `node-ci.yml`           | Parallel format, lint, test, build/syntax checks; one `CI result` gate                           |
-| `python-ci.yml`         | Parallel format, lint, test, compile checks; one `CI result` gate                                |
-| `container-publish.yml` | Build, Trivy scan, push immutable `sha-<full SHA>` to ECR; return digest URI                     |
-| `ecs-deploy.yml`        | Register task revision, update service, wait and verify requested revision, optional HTTPS smoke |
-| `container-release.yml` | Validate release tag and successful dev CD, promote digest, open production GitOps PR            |
-| `frontend-delivery.yml` | Build/deploy S3 on dev; promote the archived dev artifact on release tags                        |
-
-`sonarqube.yml` and `dependabot-auto-merge.yml` remain available for other callers;
-the basic application pipelines do not use automatic merging.
+| Workflow | Purpose |
+| --- | --- |
+| `ci-node.yml` | Node.js format, lint, test, and build or syntax checks |
+| `ci-python.yml` | Python format, lint, test, and compile checks |
+| `ci-sonarqube.yml` | SonarQube analysis using CI coverage |
+| `push-ghcr.yml` | Build and scan an image, then publish to GHCR on the Dev branch and return its digest |
+| `cd-dev.yml` | Run the GHCR workflow and open a PR to update the Dev GitOps manifest |
+| `cd-prod.yml` | Open a Prod GitOps PR for the tested Dev digest |
+| `legacy-ecr-publish.yml` | Build, scan, and publish images to ECR |
+| `release.yml` | Promote a legacy ECR digest and open a production GitOps PR |
 
 ## Shared EKS GitOps
 
-Frontend, Backend and Notification use `ghcr-dev.yml` to build, scan and publish an image to GHCR, then update their own Dev image patch on the manifest repository's `dev` branch. The source repository grants the workflow `packages: write`. A `GITOPS_TOKEN` scoped to the manifest repository grants Contents write and Pull requests write. Make the GHCR packages public for anonymous pulls.
+Frontend, Backend and Notification call `cd-dev.yml`. It uses `push-ghcr.yml` to build, scan and publish an image, then opens a PR into the manifest repository's `main` branch to update only that component's Dev image patch. The source repository grants the workflow `packages: write`. A `GITOPS_TOKEN` scoped to the manifest repository grants Contents write and Pull requests write. Make the GHCR packages public for anonymous pulls.
 
-After verifying the running Dev digest, use `gitops-promote.yml` to open a PR for that digest into the manifest repository's protected `main` branch. Argo CD syncs Dev and Prod from their respective branches. Frontend pods use the same ALB hostname as their backend API.
+After verifying the running Dev digest, use `cd-prod.yml` to open a PR for that digest into the same protected `main` branch. Argo CD syncs Dev and Prod from their respective overlay directories on `main`. Frontend pods use the same ALB hostname as their backend API.
 
 ## Legacy ECS and ECR flow
 

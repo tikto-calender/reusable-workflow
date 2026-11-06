@@ -1,16 +1,14 @@
-name: Publish GHCR and update Dev
+name: Push image to GHCR
 on:
   workflow_call:
     inputs:
       component:
         required: true
         type: string
-      gitops-repository:
-        required: true
-        type: string
-    secrets:
-      GITOPS_TOKEN:
-        required: true
+    outputs:
+      image:
+        description: Published image URI with digest.
+        value: ${{ jobs.publish.outputs.image }}
 
 permissions:
   contents: read
@@ -69,58 +67,3 @@ jobs:
           digest=$(sed -nE 's/.*digest: (sha256:[a-f0-9]{64}).*/\1/p' "$RUNNER_TEMP/ghcr-push.log" | tail -n 1)
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           echo "image=${IMAGE_TAG%:*}@$digest" >> "$GITHUB_OUTPUT"
-
-  gitops:
-    if: github.ref == 'refs/heads/dev'
-    needs: publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: dev
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.gitops-repository }}
-          token: ${{ secrets.GITOPS_TOKEN }}
-          ref: dev
-      - name: Update Dev overlay
-        env:
-          COMPONENT: ${{ inputs.component }}
-          IMAGE: ${{ needs.publish.outputs.image }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if ! docker manifest inspect "$IMAGE" > /dev/null; then
-            echo "::error::The image must be publicly pullable from GHCR. Check the package visibility, then rerun the GitOps job."
-            exit 1
-          fi
-          export PATCH="apps/tikto/overlays/dev/$COMPONENT-image.yaml"
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-
-          for attempt in 1 2 3 4 5; do
-            git fetch origin dev
-            git checkout --force --detach FETCH_HEAD
-            if [[ "$(gh api "repos/$GITHUB_REPOSITORY/branches/dev" --jq .commit.sha)" != "$GITHUB_SHA" ]]; then
-              echo "A newer Dev commit superseded this build."
-              exit 0
-            fi
-            python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path(os.environ["PATCH"])
-          image = os.environ["IMAGE"]
-          text, count = re.subn(r"(?m)^(\s+image: )\S+$", lambda match: match[1] + image, path.read_text())
-          if count != 1:
-              raise SystemExit("Expected exactly one image field")
-          path.write_text(text)
-          PY
-            git add "$PATCH"
-            if git diff --cached --quiet; then exit 0; fi
-            git commit -m "dev: deploy $COMPONENT $GITHUB_SHA"
-            if git push origin HEAD:refs/heads/dev; then exit 0; fi
-            sleep "$attempt"
-          done
-          echo "Could not update the GitOps dev branch." >&2
-          exit 1
