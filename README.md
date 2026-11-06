@@ -14,7 +14,13 @@ Application repositories own triggers and inputs; this repository owns the jobs.
 `sonarqube.yml` and `dependabot-auto-merge.yml` remain available for other callers;
 the basic application pipelines do not use automatic merging.
 
-## Flow
+## Shared EKS GitOps
+
+Frontend, Backend and Notification use `ghcr-dev.yml` to build, scan and publish an image to GHCR, then update their own Dev image patch on the manifest repository's `dev` branch. The source repository grants the workflow `packages: write`. A `GITOPS_TOKEN` scoped to the manifest repository grants Contents write and Pull requests write. Make the GHCR packages public for anonymous pulls.
+
+After verifying the running Dev digest, use `gitops-promote.yml` to open a PR for that digest into the manifest repository's protected `main` branch. Argo CD syncs Dev and Prod from their respective branches. Frontend pods use the same ALB hostname as their backend API.
+
+## Legacy ECS and ECR flow
 
 ```text
 PR -> dev: parallel quality checks -> CI result -> manual merge
