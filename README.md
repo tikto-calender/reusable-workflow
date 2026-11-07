@@ -7,17 +7,21 @@ Application repositories own triggers and inputs; this repository owns the jobs.
 | `ci-node.yml` | Node.js format, lint, test, and build or syntax checks |
 | `ci-python.yml` | Python format, lint, test, and compile checks |
 | `ci-sonarqube.yml` | SonarQube analysis using CI coverage |
-| `push-ghcr.yml` | Build and scan an image, then publish to GHCR on the Dev branch and return its digest |
-| `cd-dev.yml` | Run the GHCR workflow and open a PR to update the Dev GitOps manifest |
-| `cd-prod.yml` | Open a Prod GitOps PR for the tested Dev digest |
+| `push-ghcr.yml` | Build and scan an image, then publish to GHCR and return its digest |
+| `cd-dev.yml` | Deploy the Dev image by digest and record its source commit |
+| `cd-prod.yml` | Promote one Dev image to Prod and record its release version |
+| `finalize-release.yml` | Tag the verified source commit, create a GitHub Release, and open a source PR |
 | `legacy-ecr-publish.yml` | Build, scan, and publish images to ECR |
 | `release.yml` | Promote a legacy ECR digest and open a production GitOps PR |
 
 ## Shared EKS GitOps
 
-Frontend, Backend and Notification call `cd-dev.yml`. It uses `push-ghcr.yml` to build, scan and publish an image, then opens a PR into the manifest repository's `main` branch to update only that component's Dev image patch. The source repository grants the workflow `packages: write`. A `GITOPS_TOKEN` scoped to the manifest repository grants Contents write and Pull requests write. Make the GHCR packages public for anonymous pulls.
+1. CI checks pull requests into `dev` and pushes to `feat/**` when relevant files change.
+2. Each push to `dev` builds, scans and publishes an image to GHCR. CD updates the Dev overlay and writes `releases/dev/<component>.json` in one commit on manifest `main`. Run this CD once for each service to create the record before its first promotion.
+3. After verifying Dev, run **Promote production** from manifest `main` with a service and a version. It updates the Prod overlay, records the version under `releases/<component>/`, and updates the active version in the same commit. Argo CD reads the Dev and Prod overlays on manifest `main`.
+4. Check that the Prod Argo CD app is synced and healthy, confirm it runs the selected digest, and verify the application. Then run **Finalize release** from source `main` with the same version. It tags the recorded source SHA, creates its GitHub Release, and opens a source PR into `main` if needed. Merge the PR with a merge commit to preserve the released SHA. Merge source `main` back into `dev` before the next release so the next release candidate includes the previous merge.
 
-After verifying the running Dev digest, use `cd-prod.yml` to open a PR for that digest into the same protected `main` branch. Argo CD syncs Dev and Prod from their respective overlay directories on `main`. Frontend pods use the same ALB hostname as their backend API.
+The source repos need `GITOPS_TOKEN` with Contents write on manifest for Dev CD and `MANIFEST_READ_TOKEN` with Contents read for finalization. Enable PR creation by GitHub Actions in the source repos. Allow the manifest workflow's token to write directly to manifest `main` under its branch rules. Keep GHCR packages public for the existing anonymous pull configuration.
 
 ## Legacy ECS and ECR flow
 
@@ -46,7 +50,7 @@ Node CI retains its command/version/working-directory/coverage inputs. Python CI
 retains equivalent inputs. Empty commands are skipped. CI uses the PR merge
 result; CD checks out the dev push; release checks out the tagged commit.
 
-## Required settings
+## Required settings for legacy ECS and ECR callers
 
 | Scope                            | Setting                                                                                        |
 | -------------------------------- | ---------------------------------------------------------------------------------------------- |
@@ -75,7 +79,7 @@ version tags and `prod` approval. Restrict `dev` deployments to dev branch and
 promotion, preserve the tested SHA (fast-forward main); a squash/merge-created
 commit without its own dev deployment cannot be released.
 
-## Release and retry
+## Legacy release and retry
 
 After dev testing, fast-forward main to the tested commit, push main, then push
 `vMAJOR.MINOR.PATCH` pointing to that exact commit. Pushing main does not deploy.

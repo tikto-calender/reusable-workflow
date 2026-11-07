@@ -1,0 +1,74 @@
+name: Finalize Source Release
+on:
+  workflow_call:
+    inputs:
+      component:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      gitops-repository:
+        required: true
+        type: string
+    secrets:
+      MANIFEST_READ_TOKEN:
+        description: Contents read on the GitOps repository.
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require the source main branch
+        run: |
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run this workflow from the source main branch."
+            exit 1
+          fi
+
+      - name: Check out release scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: workflow-tools
+          persist-credentials: false
+
+      - name: Check out source history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          path: source
+
+      - name: Check out manifest
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gitops-repository }}
+          token: ${{ secrets.MANIFEST_READ_TOKEN }}
+          ref: main
+          path: manifest
+          persist-credentials: false
+
+      - name: Verify the active Production release
+        id: release
+        working-directory: manifest
+        env:
+          COMPONENT: ${{ inputs.component }}
+          VERSION: ${{ inputs.version }}
+        run: python ../workflow-tools/scripts/gitops_release.py verify-prod "$COMPONENT" "$VERSION"
+
+      - name: Publish the source release and open the main PR
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          IMAGE: ${{ steps.release.outputs.image }}
+        run: bash ../workflow-tools/scripts/finalize_release.sh

@@ -1,22 +1,16 @@
-name: Promote Development to Production
+name: Promote Production
 on:
   workflow_call:
     inputs:
       component:
         required: true
         type: string
-      gitops-repository:
+      version:
         required: true
         type: string
-      digest:
-        required: true
-        type: string
-    secrets:
-      GITOPS_TOKEN:
-        required: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   promote:
@@ -24,58 +18,30 @@ jobs:
     timeout-minutes: 10
     environment: prod
     steps:
-      - name: Checkout GitOps repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.gitops-repository }}
-          token: ${{ secrets.GITOPS_TOKEN }}
-          ref: main
-
-      - name: Validate promotion prerequisites
-        env:
-          COMPONENT: ${{ inputs.component }}
-          DIGEST: ${{ inputs.digest }}
+      - name: Require the manifest main branch
         run: |
-          case "$COMPONENT" in backend|notification|frontend) ;; *) exit 1 ;; esac
-          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
-
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          IMAGE="ghcr.io/${owner}/${COMPONENT}@${DIGEST}"
-          dev_image=$(sed -nE 's/^[[:space:]]+image: (.+)$/\1/p' "apps/tikto/overlays/dev/${COMPONENT}-image.yaml")
-          if [[ "$dev_image" != "$IMAGE" ]]; then
-            echo "::error::The requested digest is not the current Dev manifest image."
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run this workflow from the manifest main branch."
             exit 1
           fi
 
-      - name: Update Prod overlay image
-        env:
-          PATCH: "apps/tikto/overlays/prod/${{ inputs.component }}-image.yaml"
-          COMPONENT: ${{ inputs.component }}
-          DIGEST: ${{ inputs.digest }}
-        run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          IMAGE="ghcr.io/${owner}/${COMPONENT}@${DIGEST}"
-          export IMAGE
-          python -c '
-          import os, re, pathlib
-          p = pathlib.Path(os.environ["PATCH"])
-          text, count = re.subn(r"(?m)^(\s+image: )\S+$", r"\g<1>" + os.environ["IMAGE"], p.read_text())
-          assert count == 1, "Expected exactly one image field"
-          p.write_text(text)
-          '
+      - name: Check out release scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: workflow-tools
+          persist-credentials: false
 
-      - name: Commit and push straight to main
+      - name: Check out manifest
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: manifest
+
+      - name: Promote the current Dev image
+        working-directory: manifest
         env:
-          PATCH: "apps/tikto/overlays/prod/${{ inputs.component }}-image.yaml"
           COMPONENT: ${{ inputs.component }}
-          DIGEST: ${{ inputs.digest }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$PATCH"
-          if git diff --staged --quiet; then
-            echo "No changes to deploy."
-            exit 0
-          fi
-          git commit -m "prod: promote $COMPONENT $DIGEST"
-          git push origin main
+          VERSION: ${{ inputs.version }}
+        run: python ../workflow-tools/scripts/gitops_release.py promote "$COMPONENT" "$VERSION"

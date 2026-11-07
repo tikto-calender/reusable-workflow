@@ -32,10 +32,10 @@ jobs:
         env:
           COMPONENT: ${{ inputs.component }}
         run: |
-          case "$GITHUB_REF" in
-            refs/heads/dev|refs/heads/feat/*) ;;
-            *) echo "::error::Select dev or a feat/ branch."; exit 1 ;;
-          esac
+          if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF" != refs/heads/dev ]]; then
+            echo "::error::Publishing requires a push to dev."
+            exit 1
+          fi
           case "$COMPONENT" in backend|notification|frontend) ;; *) exit 1 ;; esac
 
       - name: Set up Docker Buildx
@@ -71,19 +71,14 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
-      - name: Push image to GHCR
-        if: github.ref == 'refs/heads/dev'
-        id: push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Resolve published image
-        if: github.ref == 'refs/heads/dev'
+      - name: Push the scanned image and record its digest
         id: image
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.tags }}
         run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "image=ghcr.io/${owner}/${{ inputs.component }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          docker push "$IMAGE_TAG"
+          image_repository="${IMAGE_TAG%:*}"
+          image=$(docker image inspect "$IMAGE_TAG" |
+            jq -er --arg prefix "$image_repository@sha256:" \
+              '.[0].RepoDigests | map(select(startswith($prefix))) | first')
+          echo "image=$image" >> "$GITHUB_OUTPUT"

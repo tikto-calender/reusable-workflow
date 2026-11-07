@@ -1,4 +1,4 @@
-name: Deploy Development Environment
+name: Deploy Dev
 on:
   workflow_call:
     inputs:
@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     uses: ./.github/workflows/push-ghcr.yml
     permissions:
       contents: read
@@ -25,55 +26,31 @@ jobs:
       component: ${{ inputs.component }}
 
   gitops:
-    if: github.ref == 'refs/heads/dev'
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: dev
     steps:
-      - name: Checkout GitOps repo
+      - name: Check out release scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: workflow-tools
+          persist-credentials: false
+
+      - name: Check out manifest
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.gitops-repository }}
           token: ${{ secrets.GITOPS_TOKEN }}
           ref: main
+          path: manifest
 
-      - name: Validate image and commit
+      - name: Record the Dev image and source commit
+        working-directory: manifest
         env:
-          IMAGE: ${{ needs.publish.outputs.image }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          docker manifest inspect "$IMAGE" > /dev/null
-          LATEST_SHA=$(gh api "repos/$GITHUB_REPOSITORY/branches/dev" --jq .commit.sha)
-          if [[ "$LATEST_SHA" != "$GITHUB_SHA" ]]; then
-            echo "A newer Dev commit superseded this build."
-            exit 0
-          fi
-
-      - name: Update Dev overlay image
-        env:
-          PATCH: "apps/tikto/overlays/dev/${{ inputs.component }}-image.yaml"
-          IMAGE: "${{ needs.publish.outputs.image }}"
-        run: |
-          python -c '
-          import os, re, pathlib
-          p = pathlib.Path(os.environ["PATCH"])
-          text, count = re.subn(r"(?m)^(\s+image: )\S+$", r"\g<1>" + os.environ["IMAGE"], p.read_text())
-          assert count == 1, "Expected exactly one image field"
-          p.write_text(text)
-          '
-
-      - name: Commit and push straight to main
-        env:
-          PATCH: "apps/tikto/overlays/dev/${{ inputs.component }}-image.yaml"
           COMPONENT: ${{ inputs.component }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$PATCH"
-          if git diff --staged --quiet; then
-            echo "No changes to deploy."
-            exit 0
-          fi
-          git commit -m "dev: deploy $COMPONENT $GITHUB_SHA"
-          git push origin main
+          IMAGE: ${{ needs.publish.outputs.image }}
+          GH_TOKEN: ${{ github.token }}
+        run: python ../workflow-tools/scripts/gitops_release.py update-dev "$COMPONENT"
