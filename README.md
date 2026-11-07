@@ -8,8 +8,8 @@ Application repositories own triggers and inputs; this repository owns the jobs.
 | `ci-python.yml` | Python format, lint, test, and compile checks |
 | `ci-sonarqube.yml` | SonarQube analysis using CI coverage |
 | `push-ghcr.yml` | Build and scan an image, then publish to GHCR and return its digest |
-| `cd-dev.yml` | Deploy the Dev image by digest and record its source commit |
-| `cd-prod.yml` | Promote one Dev image to Prod and record its release version |
+| `cd-dev.yml` | Deploy the Dev image by digest |
+| `cd-prod.yml` | Retag one Dev image and deploy its pinned version to Prod |
 | `finalize-release.yml` | Tag the verified source commit, create a GitHub Release, and open a source PR |
 | `legacy-ecr-publish.yml` | Build, scan, and publish images to ECR |
 | `release.yml` | Promote a legacy ECR digest and open a production GitOps PR |
@@ -17,9 +17,15 @@ Application repositories own triggers and inputs; this repository owns the jobs.
 ## Shared EKS GitOps
 
 1. CI checks pull requests into `dev` and pushes to `feat/**` when relevant files change.
-2. Each push to `dev` builds, scans and publishes an image to GHCR. CD updates the Dev overlay and writes `releases/dev/<component>.json` in one commit on manifest `main`. Run this CD once for each service to create the record before its first promotion.
-3. After verifying Dev, run **Promote production** from manifest `main` with a service and a version. It updates the Prod overlay, records the version under `releases/<component>/`, and updates the active version in the same commit. Argo CD reads the Dev and Prod overlays on manifest `main`.
-4. Check that the Prod Argo CD app is synced and healthy, confirm it runs the selected digest, and verify the application. Then run **Finalize release** from source `main` with the same version. It tags the recorded source SHA, creates its GitHub Release, and opens a source PR into `main` if needed. Merge the PR with a merge commit to preserve the released SHA. Merge source `main` back into `dev` before the next release so the next release candidate includes the previous merge.
+2. Each push to `dev` builds, scans and publishes an image to GHCR with a `sha-<commit>` tag and OCI source/revision labels. CD updates only the image digest in `overlays/dev/` on manifest `main`.
+3. After verifying Dev, run **Promote production** from manifest `main` with a service and a version. It retags the exact Dev digest as `vMAJOR.MINOR.PATCH` on GHCR, without rebuilding. It writes `ghcr.io/<owner>/<component>:<version>@sha256:<digest>` to the Prod image patch. Argo CD reads the Dev and Prod overlays on manifest `main`.
+4. Check that the Prod Argo CD app is synced and healthy, confirm it runs the selected digest, and verify the application. Then run **Finalize release** from source `main` with the same version. It verifies the GHCR version tag against the pinned Prod image and reads the source SHA from its OCI labels. It tags that SHA, creates its GitHub Release, and opens a source PR into `main` if needed. Merge the PR with a merge commit to preserve the released SHA. Merge source `main` back into `dev` before the next release so the next release candidate includes the previous merge.
+
+Version tags must retain their original digest. An existing version with a different digest is rejected. A retry after retagging but before the manifest push reuses the same image. Once a version was deployed and Prod moved on, promotion refuses to redeploy that old version. Git history provides this check, so the promotion checkout includes full history.
+
+In each GHCR package's settings, grant the `manifest` repository **Write** under **Manage Actions access**. Promotion uses manifest's `GITHUB_TOKEN` with `packages: write`. Source finalization uses `packages: read` on its own package. Keep release tags on GHCR available for later finalization.
+
+Publish the shared workflow revision before updating callers and migrating manifest paths. Update callers pinned to an older shared SHA, then move `apps/base` to `base` and `apps/tikto/overlays` to `overlays`. Reapply `bootstrap/dev.yaml` and `bootstrap/prod.yaml` to the cluster so the existing Argo CD Applications read the new paths. Remove obsolete `releases/` records after all callers use the new scripts. The new scripts support both layouts during migration.
 
 The source repos need `GITOPS_TOKEN` with Contents write on manifest for Dev CD and `MANIFEST_READ_TOKEN` with Contents read for finalization. Enable PR creation by GitHub Actions in the source repos. Allow the manifest workflow's token to write directly to manifest `main` under its branch rules. Keep GHCR packages public for the existing anonymous pull configuration.
 

@@ -54,6 +54,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ inputs.component }}
           tags: type=raw,value=sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
       - name: Build image for scanning
         uses: docker/build-push-action@v6
