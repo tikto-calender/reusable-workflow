@@ -199,16 +199,18 @@ def main():
     if args.operation == "update-dev":
         update_dev(args.component, owner)
         return
-    if not args.version or not VERSION.fullmatch(args.version):
-        parser.error("version must use the vMAJOR.MINOR.PATCH format")
+    version = "v" + (args.version or "").strip().removeprefix("v")
+    if not VERSION.fullmatch(version):
+        parser.error("enter a version such as 1.2.3 or v1.2.3")
     if args.operation == "promote":
-        promote(args.component, args.version, owner)
+        promote(args.component, version, owner)
         return
 
-    record = verify_prod(args.component, args.version, owner)
+    record = verify_prod(args.component, version, owner)
     if f"{owner}/{SOURCE_REPOSITORIES[args.component]}" != os.environ["GITHUB_REPOSITORY"].lower():
         raise ValueError("Release belongs to a different source repository.")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+        print(f"version={version}", file=output)
         print(f"source_sha={record['source_sha']}", file=output)
         print(f"image={record['image']}", file=output)
 
