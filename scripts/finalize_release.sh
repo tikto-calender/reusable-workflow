@@ -35,7 +35,7 @@ fi
 
 if ! gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null; then
   gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
-    --title "$VERSION" --generate-notes --notes "Production image: `$IMAGE`"
+    --title "$VERSION" --generate-notes --notes "Production image: $IMAGE"
 fi
 
 if [[ "$needs_pr" == false ]]; then
