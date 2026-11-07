@@ -79,7 +79,7 @@ jobs:
         working-directory: source
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.release.outputs.version }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           IMAGE: ${{ steps.release.outputs.image }}
         run: bash ../workflow-tools/scripts/finalize_release.sh

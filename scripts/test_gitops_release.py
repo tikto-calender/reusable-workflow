@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -79,6 +80,20 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(release.verify_prod("backend", "v1.2.3", "tikto-calender"),
                          {"source_sha": self.sha, "image": self.prod_image})
         self.assertFalse(Path("releases").exists())
+
+    def test_cli_promote_accepts_version_without_prefix(self):
+        with patch.object(sys, "argv", ["gitops_release.py", "promote", "backend", " 1.2.3 "]), \
+             patch.dict(os.environ, GITHUB_REPOSITORY_OWNER="tikto-calender"):
+            release.main()
+        self.assertEqual(self.tags, {self.tag: self.digest})
+
+    def test_cli_verify_outputs_version_for_source_tag(self):
+        self.tags[self.tag] = self.digest
+        self.write_image("prod", self.prod_image)
+        with patch.object(sys, "argv", ["gitops_release.py", "verify-prod", "backend", "1.2.3"]), \
+             patch.dict(os.environ, GITHUB_REPOSITORY_OWNER="tikto-calender", GITHUB_OUTPUT="output.txt"):
+            release.main()
+        self.assertIn("version=v1.2.3", Path("output.txt").read_text(encoding="utf-8").splitlines())
 
     def test_retry_after_tag_created_before_manifest_push(self):
         self.tags[self.tag] = self.digest
