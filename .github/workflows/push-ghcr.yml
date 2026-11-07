@@ -32,10 +32,14 @@ jobs:
         env:
           COMPONENT: ${{ inputs.component }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF" != refs/heads/dev ]]; then
-            echo "::error::Publishing requires a push to dev."
+          if [[ "$GITHUB_REF" != refs/heads/dev ]]; then
+            echo "::error::Publishing requires the dev branch."
             exit 1
           fi
+          case "$GITHUB_EVENT_NAME" in
+            push|workflow_dispatch) ;;
+            *) echo "::error::Publishing requires a Dev push or a manual Dev deployment."; exit 1 ;;
+          esac
           case "$COMPONENT" in backend|notification|frontend) ;; *) exit 1 ;; esac
 
       - name: Set up Docker Buildx
