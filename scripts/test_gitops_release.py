@@ -167,6 +167,26 @@ class ReleaseTest(unittest.TestCase):
         release.promote("backend", "v1.2.3", "tikto-calender")
         self.assertEqual(release.verify_prod("backend", "v1.2.3", "tikto-calender")["source_sha"], self.sha)
 
+    def test_updates_helm_dev_values_and_verifies_active_prod_backend(self):
+        root = Path("charts/tikto/environments")
+        dev = root / "dev/backend-image.yaml"
+        prod = root / "prod/backend-image.yaml"
+        for path, values in (
+            (dev, "backend:\n  image: placeholder\n"),
+            (prod, f"backend:\n  image: {self.prod_image}\n"),
+        ):
+            path.parent.mkdir(parents=True)
+            path.write_text(values, encoding="utf-8")
+        prod.with_name("backend-slot").write_text("blue\n", encoding="utf-8")
+        self.tags[self.tag] = self.digest
+
+        release.update_dev("backend", "tikto-calender")
+
+        self.assertEqual(dev.read_text(encoding="utf-8"), f"backend:\n  image: {self.dev_image}\n")
+        self.assertEqual(release.verify_prod("backend", "v1.2.3", "tikto-calender")["image"], self.prod_image)
+        with self.assertRaisesRegex(ValueError, "Promote Backend"):
+            release.promote("backend", "v1.2.3", "tikto-calender")
+
 
 if __name__ == "__main__":
     unittest.main()

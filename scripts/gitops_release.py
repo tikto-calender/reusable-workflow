@@ -25,7 +25,10 @@ def run(*args):
 
 
 def image_patch(environment, component):
-    # Accept checkouts from either side of the manifest layout migration.
+    chart = Path("charts/tikto/environments")
+    if chart.is_dir():
+        return chart / environment / f"{component}-image.yaml"
+    # Keep supporting manifest checkouts from before the Helm migration.
     root = Path("overlays")
     if not root.is_dir():
         root = Path("apps/tikto/overlays")
@@ -149,6 +152,8 @@ def verify_prod(component, version, owner):
 
 def promote(component, version, owner):
     patch = image_patch("prod", component)
+    if component == "backend" and patch.with_name("backend-slot").is_file():
+        raise ValueError("Use Promote Backend (blue/green) in the manifest repository.")
     dev_patch = image_patch("dev", component)
     selected = read_image(dev_patch)
     validate_digest_image(selected, component, owner)
