@@ -34,7 +34,7 @@ jobs:
           fi
 
       - name: Check out release scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -42,14 +42,14 @@ jobs:
           persist-credentials: false
 
       - name: Check out source history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
           path: source
 
       - name: Check out manifest
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ inputs.gitops-repository }}
           token: ${{ secrets.MANIFEST_READ_TOKEN }}

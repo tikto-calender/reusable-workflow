@@ -34,7 +34,7 @@ jobs:
     environment: dev
     steps:
       - name: Check out release scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out manifest
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ inputs.gitops-repository }}
           token: ${{ secrets.GITOPS_TOKEN }}
