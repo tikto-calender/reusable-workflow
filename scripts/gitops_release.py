@@ -153,7 +153,7 @@ def verify_prod(component, version, owner):
 def promote(component, version, owner):
     patch = image_patch("prod", component)
     if component == "backend" and patch.with_name("backend-slot").is_file():
-        raise ValueError("Use Promote Backend (blue/green) in the manifest repository.")
+        raise ValueError("Switch the Manifest to a single Backend Deployment before promoting.")
     dev_patch = image_patch("dev", component)
     selected = read_image(dev_patch)
     validate_digest_image(selected, component, owner)
