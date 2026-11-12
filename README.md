@@ -1,6 +1,38 @@
 # Shared CI/CD workflows
 
-Application repositories own triggers and inputs; this repository owns the jobs.
+This repository provides the GitHub Actions jobs used by TikTo's application and Manifest repositories. Each caller defines when its workflow runs and supplies the inputs. The shared jobs run checks, publish images, update image digests in Manifest and finalize releases.
+
+## Use a shared workflow
+
+Add a job to a workflow in the calling repository. For example, a Node application can call the shared CI job on pull requests into `dev`:
+
+```yaml
+name: CI
+on:
+  pull_request:
+    branches: [dev]
+permissions:
+  contents: read
+jobs:
+  quality:
+    uses: tikto-calender/reusable-workflow/.github/workflows/ci-node.yml@main
+    with:
+      build-command: npm run build
+```
+
+This example expects a committed `package-lock.json` and npm scripts for formatting checks, linting, tests and build. For other commands and required secrets, use the `workflow_call` inputs declared in the relevant workflow file below. Check the run in the **Actions** tab of the calling repository.
+
+## Test the release scripts locally
+
+From this repository's root, use Python 3.11 or later and Git:
+
+```powershell
+python -B -m unittest discover -s scripts -p 'test_*.py' -v
+```
+
+The tests create temporary Git repositories and mock registry access. They cover digest pinning, retries, concurrent updates and release finalization.
+
+## Available workflows
 
 | Workflow | Purpose |
 | --- | --- |
@@ -9,104 +41,32 @@ Application repositories own triggers and inputs; this repository owns the jobs.
 | `ci-sonarqube.yml` | SonarQube analysis using CI coverage |
 | `push-ghcr.yml` | Build and scan an image, then publish to GHCR and return its digest |
 | `cd-dev.yml` | Deploy the Dev image by digest |
-| `cd-prod.yml` | Retag one Dev image and deploy its pinned version to Prod |
+| `cd-prod.yml` | Promote the Frontend or Notification Dev digest by pinning it in the Prod Helm values |
+| `cd-prod-backend.yml` | Stage the Backend Dev digest, verify it, and switch Prod traffic to the verified slot |
 | `finalize-release.yml` | Tag the verified source commit, create a GitHub Release, and open a source PR |
-| `legacy-ecr-publish.yml` | Build, scan, and publish images to ECR |
-| `release.yml` | Promote a legacy ECR digest and open a production GitOps PR |
 
 ## Shared EKS GitOps
 
-1. CI checks pull requests into `dev` and pushes to `feat/**` when relevant files change.
-   Feature PRs are merged manually. Remove legacy feature auto-merge workflows from the default branch as well as Dev.
-2. Each push to `dev` builds, scans and publishes an image to GHCR with a `sha-<commit>` tag and OCI source/revision labels. CD updates only the image digest in `charts/tikto/environments/dev/` on manifest `main`.
-   If an older bot merge suppressed the push workflow, run **Deploy Dev** manually with branch `dev`. The caller must also exist on the default branch for GitHub to expose its Run workflow button. Manual deployment of another branch is rejected.
-3. After verifying Dev, run **Promote production** from manifest `main` with a service and a version. It retags the exact Dev digest as `vMAJOR.MINOR.PATCH` on GHCR, without rebuilding. It writes `ghcr.io/<owner>/<component>:<version>@sha256:<digest>` to the Prod image patch. Argo CD renders the Helm chart with the Dev or Prod environment values on manifest `main`. Promote Backend with the separate blue/green workflow in the manifest repository.
+The promotion buttons are in the Manifest repository's Actions tab. **Promote Frontend** and **Promote Notification** call [`cd-prod.yml`](.github/workflows/cd-prod.yml). **Promote Backend (blue/green)** calls [`cd-prod-backend.yml`](.github/workflows/cd-prod-backend.yml), which runs [`backend_release.py`](scripts/backend_release.py) from this repository against the Manifest checkout. **Promote All Services** calls both paths. [Manifest workflow files](https://github.com/tikto-calender/manifest/tree/main/.github/workflows)
+
+1. The application repositories define their own CI branch and path filters and call the shared Node or Python workflow. Feature PRs are merged manually. Remove legacy feature auto-merge workflows from the default branch as well as Dev.
+2. When a push to `dev` triggers **Deploy Dev**, the workflow builds, scans and publishes an image to GHCR with a `sha-<commit>` tag and OCI source/revision labels. CD updates the per-service image values in `charts/tikto/environments/dev/` on manifest `main`.
+   If an older bot merge suppressed the push workflow, run **Deploy Dev** manually from `dev`. The caller must expose `workflow_dispatch` on the default branch for GitHub to show the Run workflow button.
+3. After verifying Dev, run **Promote Frontend**, **Promote Notification**, or **Promote Backend (blue/green)** from manifest `main` with a version. **Promote All Services** accepts a separate version for each service. Promotion retags the exact Dev digest as `vMAJOR.MINOR.PATCH` on GHCR and pins the digest in the Prod values used by Argo CD. Backend records the active slot after the traffic checks pass. [Manifest promotion guide](https://github.com/tikto-calender/manifest#promote-to-production)
 4. Check that the Prod Argo CD app is synced and healthy, confirm it runs the selected digest, and verify the application. Then run **Finalize release** from source `main` with the same version. It verifies the GHCR version tag against the pinned Prod image and reads the source SHA from its OCI labels. It tags that SHA, creates its GitHub Release, and opens a source PR into `main` if needed. Merge the PR with a merge commit to preserve the released SHA. Merge source `main` back into `dev` before the next release so the next release candidate includes the previous merge.
 
 Version tags must retain their original digest. An existing version with a different digest is rejected. A retry after retagging but before the manifest push reuses the same image. Once a version was deployed and Prod moved on, promotion refuses to redeploy that old version. Git history provides this check, so the promotion checkout includes full history.
 
 In each GHCR package's settings, grant the `manifest` repository **Write** under **Manage Actions access**. Promotion uses manifest's `GITHUB_TOKEN` with `packages: write`. Source finalization uses `packages: read` on its own package. Keep release tags on GHCR available for later finalization.
 
-Publish the shared workflow revision before updating pinned callers. The release script supports the Helm values and the previous Kustomize layouts during migration.
+The release scripts support the Helm values and earlier Kustomize layouts during migration.
 
-The source repos need `GITOPS_TOKEN` with Contents write on manifest for Dev CD. Finalization uses `MANIFEST_READ_TOKEN` when configured and otherwise uses the existing `GITOPS_TOKEN` to read manifest. Enable PR creation by GitHub Actions in the source repos. Allow the manifest workflow's token to write directly to manifest `main` under its branch rules. Keep GHCR packages public for the existing anonymous pull configuration.
-
-## Legacy ECS and ECR flow
-
-```text
-PR -> dev: parallel quality checks -> CI result -> manual merge
-Push dev: build -> scan -> ECR -> ECS dev -> verify rollout
-Tag vX.Y.Z: validate tested commit on main -> approve prod -> promote digest -> GitOps PR
-Merge GitOps PR: Argo CD syncs production EKS -> inspect rollout health
-Frontend: build -> S3 dev; release downloads same build -> S3 prod -> smoke
-```
-
-CI only runs on application PRs into `dev`. CD runs for every dev push, including
-documentation changes, so every releasable commit has an unambiguous image/build.
-Independent CI tasks run on separate runners; each installs dependencies with a
-package-manager cache. A failed task does not cancel the other diagnostics.
+The source repos need `GITOPS_TOKEN` with Contents write on manifest for Dev CD and `MANIFEST_READ_TOKEN` with Contents read for finalization. Source callers that configure a fallback can use `GITOPS_TOKEN` to read manifest. Enable PR creation by GitHub Actions in the source repos. Allow the manifest workflow's token to write directly to manifest `main` under its branch rules. Keep GHCR packages public for the existing anonymous pull configuration.
 
 ## Callers and publication
 
-Callers contain only events, permissions, concurrency and `uses`/inputs. Publish
-this repository first. The workspace callers currently reference `@main` because
-these changes have no published shared commit yet. Before production rollout,
-replace `@main` with the published shared commit SHA (or maintain a protected
-version tag). Do not invent a SHA for unpublished local changes.
+For the Backend blue/green migration, publish [`cd-prod-backend.yml`](.github/workflows/cd-prod-backend.yml) and [`backend_release.py`](scripts/backend_release.py) to this repository's `main` before publishing the Manifest caller. The shared job uses the `prod` Environment and the `tikto-prod-preview` runner available to Manifest. Keep the release variables in Manifest's `prod` Environment. [Backend runner and environment setup](https://github.com/tikto-calender/manifest#configure-backend-bluegreen)
 
-Node CI retains its command/version/working-directory/coverage inputs. Python CI
-retains equivalent inputs. Empty commands are skipped. CI uses the PR merge
-result; CD checks out the dev push; release checks out the tagged commit.
+The current Manifest callers reference `@main`. When pinning a caller to a fixed revision, use a published commit SHA or a protected version tag.
 
-## Required settings for legacy ECS and ECR callers
-
-| Scope                            | Setting                                                                                        |
-| -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| All repos                        | `AWS_REGION=ap-southeast-2`                                                                    |
-| BE/notification repo             | `AWS_BUILD_ROLE_ARN` from shared Terraform                                                     |
-| BE/notification dev Environment  | `AWS_DEPLOY_ROLE_ARN`, `ECS_CLUSTER`, `ECS_SERVICE`                                            |
-| BE/notification dev Environment  | Optional `SMOKE_URL`, returning HTTPS JSON with `status: ok`                                   |
-| BE/notification prod Environment | `GITOPS_TOKEN`: fine-grained token with Contents/Pull requests write on the GitOps repo        |
-| BE/notification prod Environment | Optional `GITOPS_REPOSITORY`; defaults to `Flavoriy/gitops-manifest`                           |
-| FE dev and prod Environments     | `AWS_DEPLOY_ROLE_ARN`, `FRONTEND_BUCKET_NAME`, `CLOUDFRONT_DISTRIBUTION_ID`, `APPLICATION_URL` |
-
-Backend/notification production is EKS, not ECS. The release caller identifies the
-existing container in the GitOps patch (`tikto` for backend, `notification` for
-notification). Review the production workload configuration when merging the PR.
-GitOps base/overlay/patch can be overridden through reusable inputs.
-
-The build role needs ECR push, describe and pull/manifest access. Trust dev branch
-OIDC subjects for build and prod Environment subjects for promotion. ECS deploy
-uses the dev Environment role and needs DescribeServices, DescribeTaskDefinition,
-RegisterTaskDefinition, UpdateService and PassRole for its ECS roles. Terraform
-contains these policies; apply the updated shared/dev stacks before using CD.
-
-Protect `dev` with `checks / CI result` and up-to-date branches. Protect `main`,
-version tags and `prod` approval. Restrict `dev` deployments to dev branch and
-`prod` deployments to release tags using GitHub Environment policies. For source
-promotion, preserve the tested SHA (fast-forward main); a squash/merge-created
-commit without its own dev deployment cannot be released.
-
-## Legacy release and retry
-
-After dev testing, fast-forward main to the tested commit, push main, then push
-`vMAJOR.MINOR.PATCH` pointing to that exact commit. Pushing main does not deploy.
-Release requires a successful `cd.yml` push run for that SHA on dev. It never
-rebuilds an image or the frontend. Existing image version tags must match the
-source digest. Retrying promotion updates the same GitOps branch/PR.
-
-Frontend artifacts are retained for 90 days (subject to repository limits).
-Expired artifacts must be regenerated by rerunning dev CD before release.
-Old hashed S3 assets are not deleted during deployment.
-
-An ECS stability waiter can succeed after rollback: the workflow also requires
-the requested task revision, positive desired count and completed rollout.
-Service Connect sidecar/config, task roles, CPU, memory, ports and environment
-are preserved from the running task definition. Changing those settings through
-Terraform requires deliberately rolling out the resulting task revision; ignore
-changes prevents Terraform from reverting an application deployment.
-
-A successful container release means the production promotion PR was opened.
-Argo health/analysis is the authority on actual production rollout. Revert the
-GitOps image change for code rollback; data/schema rollback is a separate task.
-FE rollback can restore a retained build with the same assets-before-HTML order.
+Node and Python CI skip empty commands. CI uses the PR merge result, and Dev CD checks out the pushed commit. Finalize release resolves the tested source commit from the Prod digest.
